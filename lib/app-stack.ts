@@ -4,6 +4,7 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as path from "path";
+import * as lambdaNodejs from "aws-cdk-lib/aws-lambda-nodejs";
 
 export class AppCdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -31,36 +32,38 @@ export class AppCdkStack extends cdk.Stack {
     const dbEndpoint = cdk.Fn.importValue("RagDbEndpoint");
     const dbSecretArn = cdk.Fn.importValue("RagDbSecretArn");
 
-    const lambdaSG = new ec2.SecurityGroup(this, "LambdaSG", {
-      vpc,
-      description: "Security group for Lambda accessing RDS",
-      allowAllOutbound: true,
-    });
-
-    const ingestLambda = new lambda.Function(this, "IngestDocumentsLambda", {
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/ingest")),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [lambdaSG],
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 1024,
-      environment: {
-        DB_HOST: dbEndpoint,
-        DB_NAME: "postgres",
-        DB_USER: "raguser",
-        DB_PORT: "5432",
-        // password later via Secrets Manager
-      },
-    });
-
-    ingestLambda.connections.addSecurityGroup(dbAccessSg);
+    const ingestLambda = new lambdaNodejs.NodejsFunction(
+      this,
+      "IngestDocumentsLambda",
+      {
+        runtime: lambda.Runtime.NODEJS_20_X,
+        entry: path.join(__dirname, "../lambda/ingest/index.ts"),
+        handler: "handler",
+        vpc,
+        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        securityGroups: [dbAccessSg],
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 1024,
+        environment: {
+          DB_HOST: dbEndpoint,
+          DB_NAME: "postgres",
+          DB_PORT: "5432",
+          DB_SECRET_ARN: dbSecretArn,
+        },
+      }
+    );
 
     ingestLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["bedrock:InvokeModel"],
         resources: ["*"],
+      })
+    );
+
+    ingestLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["secretsmanager:GetSecretValue"],
+        resources: [dbSecretArn],
       })
     );
   }
