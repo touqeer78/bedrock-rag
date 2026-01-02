@@ -2,11 +2,8 @@ import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
-import * as lambda from "aws-cdk-lib/aws-lambda";
-import * as iam from "aws-cdk-lib/aws-iam";
-import * as path from "path";
 
-export class BedrockRagCdkStack extends cdk.Stack {
+export class InfraCdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
@@ -14,14 +11,34 @@ export class BedrockRagCdkStack extends cdk.Stack {
     const vpc = new ec2.Vpc(this, "RagVpc", {
       maxAzs: 2,
       natGateways: 1,
+      ipAddresses: ec2.IpAddresses.cidr("10.0.0.0/16"),
+      subnetConfiguration: [
+        {
+          name: "public",
+          subnetType: ec2.SubnetType.PUBLIC,
+          cidrMask: 24,
+        },
+        {
+          name: "private",
+          subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          cidrMask: 24,
+        },
+      ],
     });
 
     // Security Group for DB
     const dbSg = new ec2.SecurityGroup(this, "DbSecurityGroup", {
       vpc,
       allowAllOutbound: true,
-      description: "Security group for Postgres",
+      description: "Security group for Postgres Db",
     });
+
+    const dbAccessSg = new ec2.SecurityGroup(this, "DbAccessSg", { vpc });
+    dbSg.addIngressRule(
+      dbAccessSg,
+      ec2.Port.tcp(5432),
+      "Allow Lambda to access Postgres"
+    );
 
     // Postgres RDS,
     const db = new rds.DatabaseInstance(this, "RagPostgres", {
@@ -43,10 +60,6 @@ export class BedrockRagCdkStack extends cdk.Stack {
       publiclyAccessible: false,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       deletionProtection: false,
-    });
-
-    new cdk.CfnOutput(this, "DbEndpoint", {
-      value: db.instanceEndpoint.hostname,
     });
 
     const bastionSg = new ec2.SecurityGroup(this, "BastionSg", {
@@ -82,43 +95,41 @@ export class BedrockRagCdkStack extends cdk.Stack {
       "Bastion access to Postgres"
     );
 
-    // Lambda Function to interact with Bedrock
-
-    const lambdaSG = new ec2.SecurityGroup(this, "LambdaSG", {
-      vpc,
-      description: "Security group for Lambda accessing RDS",
-      allowAllOutbound: true,
+    //exporting what I need
+    new cdk.CfnOutput(this, "VpcId", {
+      value: vpc.vpcId,
+      exportName: "RagVpcId",
     });
 
-    dbSg.addIngressRule(
-      lambdaSG,
-      ec2.Port.tcp(5432),
-      "Allow Lambda to access Postgres"
-    );
-
-    const ingestLambda = new lambda.Function(this, "IngestDocumentsLambda", {
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: "index.handler",
-      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/ingest")),
-      vpc,
-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      securityGroups: [lambdaSG],
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 1024,
-      environment: {
-        DB_HOST: db.instanceEndpoint.hostname,
-        DB_NAME: "postgres",
-        DB_USER: "raguser",
-        DB_PORT: "5432",
-        // password later via Secrets Manager
-      },
+    // Export private subnet IDs
+    vpc.privateSubnets.forEach((subnet, index) => {
+      new cdk.CfnOutput(this, `PrivateSubnet${index + 1}`, {
+        value: subnet.subnetId,
+        exportName: `RagPrivateSubnet${index + 1}`,
+      });
     });
 
-    ingestLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["bedrock:InvokeModel"],
-        resources: ["*"],
-      })
-    );
+    // Export public subnet IDs
+    vpc.publicSubnets.forEach((subnet, index) => {
+      new cdk.CfnOutput(this, `PublicSubnet${index + 1}`, {
+        value: subnet.subnetId,
+        exportName: `RagPublicSubnet${index + 1}`,
+      });
+    });
+
+    new cdk.CfnOutput(this, "DbEndpoint", {
+      value: db.instanceEndpoint.hostname,
+      exportName: "RagDbEndpoint",
+    });
+
+    new cdk.CfnOutput(this, "DbSecretArn", {
+      value: db.secret!.secretArn,
+      exportName: "RagDbSecretArn",
+    });
+
+    new cdk.CfnOutput(this, "DbAccessSG", {
+      value: dbAccessSg.securityGroupId,
+      exportName: "RagDbAccessSecurityGroup",
+    });
   }
 }
