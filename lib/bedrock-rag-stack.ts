@@ -2,6 +2,9 @@ import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as ec2 from "aws-cdk-lib/aws-ec2";
 import * as rds from "aws-cdk-lib/aws-rds";
+import * as lambda from "aws-cdk-lib/aws-lambda";
+import * as iam from "aws-cdk-lib/aws-iam";
+import * as path from "path";
 
 export class BedrockRagCdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -10,7 +13,7 @@ export class BedrockRagCdkStack extends cdk.Stack {
     // VPC Creation
     const vpc = new ec2.Vpc(this, "RagVpc", {
       maxAzs: 2,
-      natGateways: 0,
+      natGateways: 1,
     });
 
     // Security Group for DB
@@ -27,7 +30,7 @@ export class BedrockRagCdkStack extends cdk.Stack {
       }),
       vpc,
       vpcSubnets: {
-        subnetType: ec2.SubnetType.PRIVATE_ISOLATED,
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
       instanceType: ec2.InstanceType.of(
         ec2.InstanceClass.T3,
@@ -37,7 +40,7 @@ export class BedrockRagCdkStack extends cdk.Stack {
       allocatedStorage: 20,
       maxAllocatedStorage: 30,
       securityGroups: [dbSg],
-      publiclyAccessible: true,
+      publiclyAccessible: false,
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       deletionProtection: false,
     });
@@ -77,6 +80,45 @@ export class BedrockRagCdkStack extends cdk.Stack {
       bastion,
       ec2.Port.tcp(5432),
       "Bastion access to Postgres"
+    );
+
+    // Lambda Function to interact with Bedrock
+
+    const lambdaSG = new ec2.SecurityGroup(this, "LambdaSG", {
+      vpc,
+      description: "Security group for Lambda accessing RDS",
+      allowAllOutbound: true,
+    });
+
+    dbSg.addIngressRule(
+      lambdaSG,
+      ec2.Port.tcp(5432),
+      "Allow Lambda to access Postgres"
+    );
+
+    const ingestLambda = new lambda.Function(this, "IngestDocumentsLambda", {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: "index.handler",
+      code: lambda.Code.fromAsset(path.join(__dirname, "../lambda/ingest")),
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [lambdaSG],
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 1024,
+      environment: {
+        DB_HOST: db.instanceEndpoint.hostname,
+        DB_NAME: "postgres",
+        DB_USER: "raguser",
+        DB_PORT: "5432",
+        // password later via Secrets Manager
+      },
+    });
+
+    ingestLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["bedrock:InvokeModel"],
+        resources: ["*"],
+      })
     );
   }
 }
